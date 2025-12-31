@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="release" content="1.1">
+<title>한글 문서 도우미 내려받기</title>
+<meta property="og:type" content="website">
+<meta property="og:title" content="한글 문서 도우미 내려받기">
+<meta property="og:description" content="최신판 1.1판 (2026. 10. 14.) · 도우미, 개인정보 가리개, 안내문">
+<meta property="og:url" content="https://jera0520.github.io/hwp-document-helper/">
+<style>
+:root {
+  --bg: #fbfaf6; --fg: #16181b; --muted: #464b52; --rule: #d8d3c7; --soft: #efece3;
+  --accent: #0c566e; --accent-hover: #083f51; --accent-fg: #ffffff; --focus: #a8431f;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131517; --fg: #eeece6; --muted: #b9bdc3; --rule: #353a40; --soft: #1f2225;
+    --accent: #86c9de; --accent-hover: #a9dbea; --accent-fg: #0b1b21; --focus: #f0a08a;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { font-size: 20px; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  line-height: 1.7; word-break: keep-all; overflow-wrap: anywhere;
+}
+.wrap { max-width: 46rem; margin: 0 auto; padding-inline: 1rem; padding-block: 2.2rem 3rem; }
+p { margin: 0 0 .6rem; }
+strong { font-weight: 700; }
+header { padding-bottom: 1.2rem; border-bottom: 1px solid var(--rule); }
+.kicker { margin: 0; font-size: .9rem; font-weight: 700; letter-spacing: .04em; color: var(--muted); }
+h1 { margin: .15rem 0 .5rem; font-size: 2rem; line-height: 1.25; font-weight: 800; text-wrap: balance; }
+.ver { margin: 0; font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.ver span { color: var(--muted); }
+h2 {
+  margin: 2.2rem 0 .7rem; padding-top: .55rem; border-top: 3px solid var(--fg);
+  font-size: 1.3rem; line-height: 1.35; font-weight: 800;
+}
+h3 { margin: 0; font-size: 1.15rem; line-height: 1.4; font-weight: 800; }
+.steps { margin: 0 0 .4rem; padding-left: 1.5em; }
+.steps li { margin: .35rem 0; padding-left: .2em; }
+.steps li::marker { font-weight: 800; }
+.addr, kbd {
+  font-family: Consolas, "D2Coding", ui-monospace, monospace; font-size: .95em;
+  background: var(--soft); padding: .05em .35em; border-radius: 3px; word-break: break-all;
+}
+kbd { border: 1px solid var(--rule); }
+.note { color: var(--muted); }
+.file {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: .8rem 1.5rem; padding-block: 1.15rem; border-top: 1px solid var(--rule);
+}
+.file:last-of-type { border-bottom: 1px solid var(--rule); }
+.file .meta { min-width: 0; }
+.file .meta p { margin: 0; }
+.fname { margin: .1rem 0 .35rem !important; font-size: .85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.act { display: flex; flex-direction: column; gap: .5rem; align-items: stretch; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: .4em;
+  min-height: 3rem; padding: 0 1.3rem; border: 2px solid var(--accent); border-radius: 4px;
+  background: var(--accent); color: var(--accent-fg); font-size: 1rem; font-weight: 700;
+  text-decoration: none; white-space: nowrap;
+}
+.btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.sub { background: transparent; color: var(--accent); }
+.btn.sub:hover { background: var(--soft); }
+.btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.spare { margin-top: 1.4rem; }
+.spare h3 { font-size: 1.05rem; }
+.log { margin: 0; }
+.log dt { margin-top: 1rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.log dt:first-child { margin-top: 0; }
+.log dt span { margin-left: .6em; font-weight: 400; color: var(--muted); }
+.log dd { margin: .2rem 0 0; }
+.log ul { margin: 0; padding-left: 1.2em; }
+.log li { margin: .2rem 0; }
+footer { margin-top: 2.6rem; padding-top: 1rem; border-top: 1px solid var(--rule); font-size: .9rem; color: var(--muted); }
+footer p { margin: .2rem 0; }
+@media (max-width: 640px) {
+  html { font-size: 19px; }
+  h1 { font-size: 1.75rem; }
+  .file { grid-template-columns: minmax(0, 1fr); }
+  .act { flex-direction: row; flex-wrap: wrap; }
+  .act .btn { flex: 1 1 10rem; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <p class="kicker">한글 문서 도우미</p>
+  <h1>최신판 내려받기</h1>
+  <p class="ver"><strong>1.1판</strong> <span>· 2026. 10. 14.</span></p>
+</header>
+
+<section>
+  <h2>처음 받으시는 분</h2>
+  <ol class="steps">
+    <li>아래 <strong>파일 네 개</strong>를 모두 받습니다.</li>
+    <li><strong>한 장 안내문</strong>을 보면서 Claude에 도우미를 올립니다. 처음 한 번만 10분 정도 걸립니다.</li>
+  </ol>
+</section>
+
+<section>
+  <h2>예전 판을 쓰고 계신 분</h2>
+  <p>이번 1.1판은 도우미(zip)만 바뀌었습니다. 가리개와 안내문은 갖고 계신 것을 그대로 쓰시면 됩니다.</p>
+  <ol class="steps">
+    <li>아래에서 <strong>한글 문서 도우미</strong>(zip)를 받습니다. 압축은 풀지 않습니다.</li>
+    <li>주소창에 <span class="addr">claude.ai/customize/skills</span>를 넣고 들어갑니다.</li>
+    <li><strong>hwp-document-helper</strong>를 누른 뒤 <strong>[⋯]</strong> → <strong>[교체]</strong>를 누릅니다.</li>
+    <li>방금 받은 zip을 고르고 <strong>[업로드]</strong>를 누릅니다. 그다음부터는 새 대화에서 쓰시면 됩니다.</li>
+  </ol>
+</section>
+
+<section id="files">
+  <h2>파일</h2>
+  <div class="file" id="f-zip">
+    <div class="meta">
+      <h3>한글 문서 도우미</h3>
+      <p class="fname">hwp-document-helper.zip · 77KB</p>
+      <p>Claude에 올리는 도우미 파일입니다. 압축을 풀지 말고 그대로 올립니다.</p>
+    </div>
+    <div class="act"><a class="btn" href="files/hwp-document-helper.zip" download="hwp-document-helper.zip" data-sha256="d923b6486b097257202b15ed2decfb4f48dc5e61b8a8423d83cee0a1674029ce" data-size="78833" aria-label="한글 문서 도우미 내려받기">내려받기</a></div>
+  </div>
+  <div class="file" id="f-masker">
+    <div class="meta">
+      <h3>개인정보 가리개</h3>
+      <p class="fname">개인정보_가리개.html · 130KB</p>
+      <p>이름·전화번호를 가리고, 완성된 한글 문서에 사진을 넣는 화면입니다. 받은 파일을 두 번 누르면 열립니다.</p>
+    </div>
+    <div class="act"><a class="btn" href="files/masker.html" download="개인정보_가리개.html" data-sha256="59cff70572bd9638ac31af546fc1be28f79aebd84090512ba836aa7aa66d8883" data-size="133170" aria-label="개인정보 가리개 내려받기">내려받기</a></div>
+  </div>
+  <div class="file" id="f-guide1">
+    <div class="meta">
+      <h3>한 장 안내문</h3>
+      <p class="fname">PDF · 1쪽 · 106KB</p>
+      <p>처음 설치부터 보고서 만들기까지 한 장에 담았습니다.</p>
+    </div>
+    <div class="act"><a class="btn" href="files/guide-1page.pdf" download="한글문서도우미_한장안내.pdf" data-sha256="c31b00e7e60b68229a52332e6f348b5ccd39b22369ed99dadee7b6e464f6fd20" data-size="108519" aria-label="한 장 안내문 내려받기">내려받기</a><a class="btn sub" href="files/guide-1page.pdf" target="_blank" rel="noopener" aria-label="한 장 안내문 바로 보기">바로 보기</a></div>
+  </div>
+  <div class="file" id="f-guide3">
+    <div class="meta">
+      <h3>상세 안내문</h3>
+      <p class="fname">PDF · 3쪽 · 201KB</p>
+      <p>화면 순서대로 자세히 적은 3쪽 안내문입니다.</p>
+    </div>
+    <div class="act"><a class="btn" href="files/guide-3page.pdf" download="한글문서도우미_상세안내.pdf" data-sha256="3ab22a2c4847a1f39ee18cae7a1ae8b23022ba3ecb120089ae39c5bad66f899c" data-size="206194" aria-label="상세 안내문 내려받기">내려받기</a><a class="btn sub" href="files/guide-3page.pdf" target="_blank" rel="noopener" aria-label="상세 안내문 바로 보기">바로 보기</a></div>
+  </div>
+  <div class="spare">
+  <div class="file spare-row" id="f-spare">
+    <div class="meta">
+      <h3>가리개가 받아지지 않을 때</h3>
+      <p class="fname">개인정보_가리개.zip · 42KB</p>
+      <p>같은 가리개를 압축한 파일입니다. 압축을 풀어 나온 파일을 쓰세요.</p>
+    </div>
+    <div class="act"><a class="btn sub" href="files/masker.zip" download="개인정보_가리개.zip" data-sha256="0d30d57158a76c635bea9ea12427ad9f2d87633cf50737bf20f5702eb77cb170" data-size="42581" aria-label="가리개가 받아지지 않을 때 내려받기">내려받기</a></div>
+  </div>
+  </div>
+</section>
+
+<section>
+  <h2>바뀐 내용</h2>
+  <dl class="log">
+    <dt>1.1판<span>2026. 10. 14. · 바뀐 파일: 도우미(zip)</span></dt>
+    <dd><ul><li>사진이 사진 칸보다 많을 때, 늘어난 사진 설명 줄이 사진 줄만큼 높아져 쪽 수가 늘어나던 문제를 고쳤습니다.</li><li>도우미에게 판을 물으면 판 번호를 알려 주고, 계속 안 될 때는 이 페이지 주소를 알려 줍니다.</li></ul></dd>
+    <dt>1.0판<span>2026. 10. 13. · 바뀐 파일: 도우미(zip), 가리개, 한 장 안내문, 상세 안내문</span></dt>
+    <dd><ul><li>처음 판입니다.</li></ul></dd>
+  </dl>
+</section>
+
+<section>
+  <h2>문제가 생기면</h2>
+  <p>오류가 난 화면을 찍어 만든 사람(김진현)에게 카톡으로 보내 주세요. 고친 판은 이 주소에 다시 올립니다.</p>
+  <p>주소는 바뀌지 않습니다. 이 페이지를 즐겨찾기(<kbd>Ctrl</kbd>+<kbd>D</kbd>)에 넣어 두세요.</p>
+  <p class="note">이 페이지 주소: <span class="addr">jera0520.github.io/hwp-document-helper</span></p>
+</section>
+
+<footer>
+  <p>개인정보 가리개는 인터넷 연결 없이 이 컴퓨터 안에서만 동작합니다.</p>
+  <p>만든 사람 김진현(AI한술)</p>
+</footer>
+</div>
+</body>
+</html>
