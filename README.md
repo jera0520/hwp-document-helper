@@ -1,6 +1,6 @@
 # 한글 문서 도우미
 
-쓰던 한글(HWP/HWPX) 양식의 디자인은 그대로 두고 내용만 채워 주는 Claude 스킬과, 내 컴퓨터 안에서 이름·전화번호를 가리는 「개인정보 가리개」입니다.
+쓰던 한글(HWP/HWPX) 양식의 디자인은 그대로 두고 내용만 채워 주는 ChatGPT·Claude 스킬과, 내 컴퓨터 안에서 이름·전화번호를 가리는 「개인정보 가리개」입니다.
 
 - 내려받기 페이지(파일과 안내문): https://jera0520.github.io/hwp-document-helper/
 - 최신판: 1.4판 (2026. 11. 13.)
@@ -20,8 +20,14 @@
 
 ## 쓰는 법
 
+ChatGPT
+1. 내려받기 페이지에서 `hwp-document-helper.zip`을 받습니다(압축은 풀지 않습니다).
+2. chatgpt.com → 입력칸 아래 「플러그인」 → 「스킬」 → 「추가」 → 「컴퓨터에서 업로드」로 zip을 올립니다(처음 한 번).
+3. 새 채팅(Work)에서 쓰던 양식(.hwpx)과 사진을 함께 올리고 「이 양식 그대로 결과보고서 만들어 줘」처럼 부탁합니다.
+
+Claude
 1. claude.ai/settings/capabilities 에서 「코드 실행 및 파일 생성」을 켭니다.
-2. 내려받기 페이지에서 `hwp-document-helper.zip`을 받아, 압축을 풀지 말고 claude.ai/customize/skills → 「Skill 추가」 → 「Skill 업로드」로 올립니다.
+2. zip을 압축을 풀지 말고 claude.ai/customize/skills → 「Skill 추가」 → 「Skill 업로드」로 올립니다.
 3. 채팅창에 쓰던 양식(.hwpx)을 올리고 「이 양식으로 ○○ 결과 보고 써 줘」처럼 부탁합니다.
 
 Claude Code에서는 `hwp-document-helper` 폴더를 `~/.claude/skills/` 아래에 넣으면 됩니다. 자세한 순서는 내려받기 페이지의 한 장 안내문과 상세 안내문에 있습니다.
