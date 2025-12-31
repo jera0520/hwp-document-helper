@@ -32,8 +32,10 @@ import math
 import os
 import random
 import re
+import shutil
 import statistics
 import struct
+import subprocess
 import sys
 import unicodedata
 import zipfile
@@ -1289,7 +1291,7 @@ class RefDoc:
             first = False
             if b.kind in ('toc', 'tochead'):
                 if not in_toc:
-                    out.append('[목차]  // 목차 줄은 "제목 | 쪽 번호". 쪽 번호를 모르면 비워 두세요.')
+                    out.append('[목차]  // 목차 줄은 "제목 | 쪽 번호". 쪽 번호를 비워 두면("제목 |") 다 만든 뒤 엔진이 채웁니다.')
                     in_toc = True
                 if b.kind == 'toc':
                     entry, page = split_toc(b.text)
@@ -1852,6 +1854,10 @@ def make_text_block(doc, item, ids, warns, counters, hint=None, used=None):
             set_cell_text(cells[role.textcell], rest.strip())
         else:
             set_cell_text(cells[min(role.textcell, len(cells) - 1)], new_prefix + rest.strip())
+        try:
+            fit_head_box(doc, p, role)
+        except Exception:
+            pass  # 너비 맞추기는 보기 좋게 하는 일이라, 못 해도 견본 너비 그대로 만든다
         ids.renew(p)
         strip_lineseg(p)
         return _same_head(doc, p, same, ids), role.key
@@ -1892,6 +1898,115 @@ def _same_head(doc, p, same, ids):
     if _nospace(''.join(t_text(t) for t in p.iter(P('t')))) != _nospace(''.join(t_text(t) for t in o.iter(P('t')))):
         return p
     return _copy_line(doc.blocks[same], ids)
+
+
+def _doc_gauge(doc):
+    """양식 글꼴 폭 비율을 맞춘 쪽 어림 도구(한 번만 만든다). 제목 상자 글자 폭을 잴 때 쓴다."""
+    g = getattr(doc, '_gauge', None)
+    if g is None:
+        g = doc._gauge = PageGauge(doc.pkg.xml('Contents/header.xml'), [doc.root])
+        doc._body_w = body_width(list(doc.root))
+    return g
+
+
+def _cell_line_w(tc, g):
+    """칸 안에서 가장 긴 줄의 글자 폭(HWPUNIT 어림)."""
+    sub = tc.find(P('subList'))
+    best = 0.0
+    for q in (sub.findall(P('p')) if sub is not None else []):
+        w = [0.0]
+        for r in para_runs(q):
+            cid = r.get('charPrIDRef')
+            for t in run_ts(r):
+                for ch in t_text(t):
+                    if ch == '\n':
+                        w.append(0.0)
+                    else:
+                        w[-1] += g.width(ch, cid)
+        best = max(best, max(w))
+    return best * g.k
+
+
+def _cell_margin(tc):
+    """칸 안 왼쪽 + 오른쪽 여백(HWPUNIT)."""
+    tbl = _ancestor(tc, 'tbl')
+    m = tc.find(P('cellMargin')) if tc.get('hasMargin') == '1' else (tbl.find(P('inMargin')) if tbl is not None else None)
+    try:
+        return int(m.get('left')) + int(m.get('right'))
+    except (AttributeError, TypeError, ValueError):
+        return 282
+
+
+def _cell_w(tc):
+    return int(tc.find(P('cellSz')).get('width'))
+
+
+def _resize_cells(tbl, cells, widths):
+    """한 줄짜리 표의 칸 너비를 바꾸고 표 너비를 칸 너비 합으로 맞춘다."""
+    for tc, w in zip(cells, widths):
+        tc.find(P('cellSz')).set('width', str(int(w)))
+    tsz = tbl.find(P('sz'))
+    if tsz is not None:
+        tsz.set('width', str(int(sum(_cell_w(tc) for tc in cells))))
+
+
+def fit_head_box(doc, p, role):
+    """제목 상자(한 줄 표) 너비를 새 글자에 맞춘다.
+    - 번호 칸: 새 번호(Ⅷ 등)가 양식이 이미 담은 가장 긴 번호보다 길면, 그 비율만큼 글 칸에서 가져와 번호 칸을 넓힌다.
+    - 글 칸: 양식에서 같은 상자의 너비가 글자마다 다르면(글자에 맞춘 상자) 양식 상자들의 「글자 폭 → 너비」 관계를
+      따라 새 글자 폭에 맞춰 넓히거나 좁힌다(쪽 본문 너비까지). 너비가 모두 같은 상자(쪽 너비 띠 등)는 글 칸 너비를 그대로 둔다.
+    원본과 글자가 같은 상자는 _same_head가 원본 상자를 그대로 옮기므로 너비도 원본 그대로다."""
+    tbl = first_table(p)
+    src = first_table(doc.blocks[role.ex].el)
+    if tbl is None or src is None or len(tbl.findall(P('tr'))) != 1 or len(src.findall(P('tr'))) != 1:
+        return
+    cells = tbl.find(P('tr')).findall(P('tc'))
+    scells = src.find(P('tr')).findall(P('tc'))
+    if len(cells) != len(scells) or not cells or any(tc_span(tc) != (1, 1) for tc in cells):
+        return
+    g = _doc_gauge(doc)
+    ti = min(role.textcell, len(cells) - 1)
+    widths = [_cell_w(tc) for tc in cells]
+    # 양식에 있는 같은 상자들(칸 수가 같은 것)
+    peers = []
+    for b in doc.blocks:
+        t = first_table(b.el) if b.kind == 'tablehead' and b.key == role.key else None
+        tr = t.find(P('tr')) if t is not None else None
+        if tr is not None and len(tr.findall(P('tc'))) == len(cells):
+            peers.append(tr.findall(P('tc')))
+    ni = role.numcell
+    if ni is not None and ni < len(cells) and ni != ti:
+        # 번호 칸: 양식이 이미 담고 있는 가장 긴 번호(III·붙임 등)보다 길 때만, 그 비율만큼 넓힌다
+        nw = _cell_line_w(cells[ni], g)
+        fit = [(_cell_line_w(c[ni], g), _cell_w(c[ni]) - _cell_margin(c[ni])) for c in peers]
+        fit = [(w, room) for w, room in fit if w > 0 and room > 0]
+        if fit:
+            w0, room0 = max(fit)
+            need = int(math.ceil(room0 * nw / w0)) + _cell_margin(cells[ni]) - widths[ni] if nw > w0 + 50 else 0
+            spare = widths[ti] - _cell_line_w(cells[ti], g) - _cell_margin(cells[ti])
+            if 0 < need < spare:
+                widths[ni] += need
+                widths[ti] -= need
+    if len({_cell_w(c[ti]) for c in peers}) >= 2:
+        # 글 칸: 양식 상자들의 「글자 폭 → 상자 너비」를 직선으로 맞춰 새 글자 폭의 너비를 정한다
+        # (양식마다 글자가 늘 때 상자를 넓히는 정도가 달라서, 여유 폭을 하나로 두면 원본 상자와 어긋난다)
+        pts = [(_cell_line_w(c[ti], g), _cell_w(c[ti])) for c in peers]
+        pts = [(x, y) for x, y in pts if x > 0]
+        xs = [x for x, _ in pts]
+        if len(set(round(x) for x in xs)) >= 3:
+            mx, my = statistics.mean(xs), statistics.mean(y for _, y in pts)
+            slope = sum((x - mx) * (y - my) for x, y in pts) / sum((x - mx) ** 2 for x in xs)
+            slope = max(1.0, min(3.0, slope))
+        else:
+            mx, my, slope = statistics.median(xs), statistics.median(y for _, y in pts), 1.0
+        tw = _cell_line_w(cells[ti], g)
+        if tw > 0:
+            room = (getattr(doc, '_body_w', 0) or sum(widths)) - (sum(widths) - widths[ti])
+            want = max(my + slope * (tw - mx), tw + _cell_margin(cells[ti]) + 200, 1000)
+            if abs(want - widths[ti]) >= 100:
+                widths[ti] = int(round(min(want, max(room, widths[ti]))))
+    if widths != [_cell_w(tc) for tc in cells]:
+        _resize_cells(tbl, cells, widths)
 
 
 def _col_widths(rows, C, W, ex_widths):
@@ -2279,6 +2394,28 @@ def keep_with_tables(blocks, start, hed):
             j -= 1
 
 
+def keep_headings(blocks, emitted, heads, box_keys, hed):
+    """제목(상자·짧은 제목 줄)과 바로 뒤 빈 줄에 '다음 문단과 함께'를 켠다. 쪽 끝에 제목만 남고 내용이 다음 쪽으로 가지 않게.
+    같은 종류 줄이 이어지는 목록(1. 2. 3. …)은 마지막 줄만, 다음 블록이 새 쪽에서 시작하면 켜지 않는다."""
+    pos = {id(b): i for i, b in enumerate(blocks)}
+    for j, (el, key) in enumerate(emitted[:-1]):
+        if key not in heads:
+            continue
+        nxt_el, nxt = emitted[j + 1]
+        if nxt_el.get('pageBreak') == '1':
+            continue
+        if key not in box_keys and (nxt == key or len(para_text(el).strip()) > 40):
+            continue
+        i = pos.get(id(el))
+        if i is None:
+            continue
+        k = i
+        while k < len(blocks) and (k == i or (not para_text(blocks[k]).strip() and not has_inline_obj(blocks[k])
+                                               and blocks[k].get('pageBreak') != '1')):
+            blocks[k].set('paraPrIDRef', hed.keep_next(blocks[k].get('paraPrIDRef')))
+            k += 1
+
+
 def body_height(blocks):
     """쪽 본문 높이(HWPUNIT): 용지 높이 - 위·아래 여백 - 머리말·꼬리말 여백. 찾지 못하면 0."""
     for b in blocks:
@@ -2289,6 +2426,21 @@ def body_height(blocks):
                 if m is not None:
                     h -= sum(int(m.get(k, '0') or 0) for k in ('top', 'bottom', 'header', 'footer'))
                 return max(0, h)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def body_width(blocks):
+    """쪽 본문 너비(HWPUNIT): 용지 너비 - 왼쪽·오른쪽·제본 여백. 찾지 못하면 0."""
+    for b in blocks:
+        for pp in b.iter(P('pagePr')):
+            try:
+                w = int(pp.get('height') if pp.get('landscape') == 'NARROWLY' else pp.get('width'))
+                m = pp.find(P('margin'))
+                if m is not None:
+                    w -= sum(int(m.get(k, '0') or 0) for k in ('left', 'right', 'gutter'))
+                return max(0, w)
             except (TypeError, ValueError):
                 return 0
     return 0
@@ -2964,15 +3116,22 @@ def build(ref_path, outline, out_path, quiet=False):
         if stale:
             warns.append('표지·머리에 옛 연도가 그대로 남아 있습니다: %s. 바꾸려면 @바꾸기: <그 글자 그대로> => 새 글자'
                          % ' / '.join('"%s"' % s[:30] for s in stale[:4]))
-    st = {'prev': None, 'pending': False, 'blank': False, 'made': 0, 'moved': list(doc.moved_ctrls), 'first': None}
+    st = {'prev': None, 'pending': False, 'blank': False, 'made': 0, 'moved': list(doc.moved_ctrls), 'first': None,
+          'emitted': [], 'toc': []}
     counters = {}
     hints = align_outline(doc, items, frame_end)
     used = set()
+    box_keys = {r.key for r in doc.box_roles}
 
     def emit(blk, key):
         if (st['prev'] is not None and not st['blank'] and not st['pending']
                 and not (st['made'] == 0 and doc.body_new_page)):
-            for bi in doc.spacing(st['prev'], key):
+            sp = doc.spacing(st['prev'], key)
+            if (not sp and doc.blank_ex is not None and key in box_keys
+                    and st['prev'].startswith('table') and not st['prev'].startswith('tablehead')):
+                # 표 바로 뒤에 제목 상자가 오면 표 아래 선과 상자가 맞닿아 보인다 → 빈 줄 하나를 둔다
+                sp = (doc.blank_ex,)
+            for bi in sp:
                 bl = copy.deepcopy(doc.blocks[bi].el)
                 remove_ctrls(bl)
                 strip_lineseg(bl)
@@ -2990,6 +3149,7 @@ def build(ref_path, outline, out_path, quiet=False):
             attach_ctrls(blk, st['moved'])
             st['moved'] = []
         new_blocks.append(blk)
+        st['emitted'].append((blk, key))
         st['prev'] = key
         st['blank'] = False
         st['made'] += 1
@@ -3055,6 +3215,11 @@ def build(ref_path, outline, out_path, quiet=False):
             warns.append('틀에 그대로 남은 것: %s. 다른 기관 양식이면 사용자에게 확인하세요.' % ' · '.join(bits))
     split_photo_tables(new_blocks, frame_end, ids, warns, doc.hedit)
     keep_with_tables(new_blocks, frame_end, doc.hedit)
+    try:
+        heads = {k for k, r in doc.roles.items() if (r.cls in HEAD_CLASSES or r.cls in NUMBERED) and not r.labeled}
+        keep_headings(new_blocks, st['emitted'], heads | box_keys, box_keys, doc.hedit)
+    except Exception:
+        pass  # 쪽 나눔 설정은 보기 좋게 하는 일이라, 못 해도 문서는 만든다
     root = doc.root
     for c in list(root):
         root.remove(c)
@@ -3068,6 +3233,11 @@ def build(ref_path, outline, out_path, quiet=False):
     doc.hedit.save()
     finish_package(pkg, doc.sec_name, root, d['title'] or (doc.title['text'] if doc.title else ''))
     pkg.save(out_path)
+    if st['toc']:
+        try:
+            warns += fill_toc_pages(out_path, pkg, doc.sec_name, root, st, set(doc.heading_keys))
+        except Exception as e:
+            warns.append('목차 쪽 번호를 자동으로 채우지 못했습니다(%s). 한글에서 쪽을 확인해 적어 주세요.' % e)
     rep = check(out_path, quiet=True)
     msg = ['[만들기 완료] %s' % out_path,
            '- 양식: %s · 틀 블록 %d개 유지 · 새 블록 %d개' % (os.path.basename(ref_path), frame_end, made)]
@@ -3128,6 +3298,144 @@ def fill_toc_para(p, entry, page):
     strip_lineseg(p)
 
 
+def toc_auto(page):
+    """목차 줄 쪽 번호를 엔진이 채울지: 비었거나 ?·자동."""
+    return (page or '').strip() in ('', '?', '？', '자동', 'auto')
+
+
+def _toc_key(s, strip_no=False):
+    """목차 줄·제목 글자 비교용: 로마 숫자(Ⅰ→I)·빈칸·문장부호를 고르고, strip_no면 앞 번호(Ⅰ. 1. 1.1 가. 붙임)도 뗀다."""
+    s = unicodedata.normalize('NFKC', s or '').strip()
+    if strip_no:
+        s = re.sub(r'^(붙\s*임|[IVXLC]+(?![a-z])|\d+(?:\s*\.\s*\d+)*|[가-하](?=\s*[.)]))\s*[.)]?\s*', '', s)
+    return re.sub(r'[\s.,·:：()\[\]「」『』<>〈〉《》\-–—_]', '', s)
+
+
+def _block_all_text(el):
+    return ''.join(t_text(t) for t in el.iter(P('t')))
+
+
+def rhwp_bin():
+    """rhwp 실행 파일(있으면). 없으면 None — 쪽 번호는 엔진 어림으로 채운다. 환경 변수 RHWP=off면 쓰지 않는다(시험용)."""
+    if os.environ.get('RHWP') == 'off':
+        return None
+    for c in (os.environ.get('RHWP'), shutil.which('rhwp'), os.path.expanduser('~/rhwp/target/release/rhwp')):
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def rhwp_pages(path):
+    """rhwp 쪽 배치로 본 {첫 구역 문단 번호: 찍히는 쪽 번호}. rhwp가 없거나 실패하면 None."""
+    b = rhwp_bin()
+    if not b:
+        return None
+    try:
+        r = subprocess.run([b, 'dump-pages', path, '--json'], capture_output=True, timeout=180)
+        d = json.loads(r.stdout.decode('utf-8', 'replace'))
+    except Exception:
+        return None
+    out = {}
+    for pg in d.get('pages') or []:
+        if pg.get('section', 0) != 0:
+            continue
+        for col in pg.get('columns') or []:
+            for it in col.get('items') or []:
+                pi = it.get('paraIndex')
+                if isinstance(pi, int) and pi not in out:
+                    out[pi] = pg.get('pageNumber') or (pg.get('pageIndex', 0) + 1)
+    return out or None
+
+
+def gauge_para_pages(pkg, root):
+    """엔진 어림 쪽 배치로 본 {문단 번호: 찍히는 쪽 번호}. 쪽 번호 새로 시작(newNum)을 반영한다."""
+    g = PageGauge(pkg.xml('Contents/header.xml'), [root])
+    blocks = root.findall(P('p'))
+    where = []
+    g.pages(blocks, where)
+    starts = []
+    for i, p in enumerate(blocks):
+        for nn in p.iter(P('newNum')):
+            if nn.get('numType') == 'PAGE':
+                try:
+                    starts.append((where[i], int(nn.get('num'))))
+                except (TypeError, ValueError):
+                    pass
+    out = {}
+    for i, pg in enumerate(where):
+        base = [(s, n) for s, n in starts if s <= pg]
+        out[i] = base[-1][1] + pg - base[-1][0] if base else pg
+    return out
+
+
+def fill_toc_pages(out_path, pkg, sec_name, root, st, heads):
+    """다 만든 문서에서 목차 줄마다 같은 제목을 찾아 쪽 번호를 채우고 다시 저장한다. 참고 글 목록을 돌려준다.
+    쪽 번호가 비었거나 ?·자동인 줄만 채우고, 적힌 번호는 그대로 둔다(실제와 다르면 알린다)."""
+    blocks = root.findall(P('p'))
+    idx = {id(b): i for i, b in enumerate(blocks)}
+    pages, how = rhwp_pages(out_path), 'rhwp'
+    if pages is None:
+        pages, how = gauge_para_pages(pkg, root), 'gauge'
+    hdr = Header(pkg.xml('Contents/header.xml'))
+    keep = {k for k, pp in hdr.para.items() if any(b.get('keepWithNext') == '1' for b in pp.iter(H('breakSetting')))}
+
+    def page_of(i):
+        # rhwp·어림은 '다음 문단과 함께'를 따르지 않는다. 한글은 묶인 제목을 뒤 블록(표 등)과 같은 쪽으로 넘기므로 그 쪽을 쓴다
+        j = i
+        while j + 1 < len(blocks) and blocks[j].get('paraPrIDRef') in keep and blocks[j + 1].get('pageBreak') != '1':
+            j += 1
+        a, b = pages.get(i), pages.get(j)
+        return min(b, a + 1) if a is not None and b is not None and b > a else a
+    toc_end = max((idx.get(id(b), -1) for b, _, _ in st['toc']), default=-1)
+    cands = sorted((idx[id(el)], key, _block_all_text(el)) for el, key in st['emitted']
+                   if id(el) in idx and idx[id(el)] > toc_end and not key.startswith('toc'))
+    hc = [c for c in cands if c[1] in heads]
+
+    def find(entry, cur):
+        for pool in (hc, cands):
+            for strip in (False, True):
+                k = _toc_key(entry, strip)
+                if not k:
+                    continue
+                for i, _, txt in pool:
+                    if i > cur and _toc_key(txt, strip) == k:
+                        return i
+        return None
+    cur, filled, missing, differ = toc_end, 0, [], []
+    for blk, entry, page in st['toc']:
+        hit = find(entry, cur)
+        if hit is None:
+            if not page:
+                missing.append(entry)
+            continue
+        cur = hit
+        pg = page_of(hit)
+        if pg is None:
+            continue
+        if not page:
+            fill_toc_para(blk, entry, str(pg))
+            filled += 1
+        elif page.strip() != str(pg):
+            differ.append('"%s" %s → %d' % (entry.strip()[:20], page.strip(), pg))
+    if filled:
+        pkg.put_xml(sec_name, root)
+        pkg.save(out_path)
+    tips = []
+    if filled:
+        tips.append('목차 쪽 번호 %d줄을 %s 채웠습니다(쪽 끝 제목이 다음 쪽 내용과 함께 넘어가는 것까지 셈). '
+                    '한글과 1쪽쯤 다를 수 있으니 한글에서 확인하세요.'
+                    % (filled, '실제 쪽 배치(rhwp)로' if how == 'rhwp' else '어림 쪽 배치로'))
+    if missing:
+        tips.append('목차 %d줄은 본문에서 같은 제목을 찾지 못해 쪽 번호를 비워 두었습니다: %s. 목차 줄 글자를 본문 제목과 똑같이 쓰세요.'
+                    % (len(missing), ' / '.join('"%s"' % m.strip()[:20] for m in missing[:4])))
+    if differ:
+        tips.append('목차에 적힌 쪽 번호가 %s 센 쪽과 다른 줄이 있습니다: %s. 적힌 번호는 그대로 두었으니 한글에서 확인하세요'
+                    '(쪽 번호 칸을 비워 두면 자동으로 채웁니다).' % ('rhwp로' if how == 'rhwp' else '어림으로', ' / '.join(differ[:4])))
+    if not tips:
+        tips.append('목차 쪽 번호는 개요에 적힌 대로 넣었습니다. 한글에서 실제 쪽과 맞는지 확인하세요.')
+    return tips
+
+
 def make_toc(doc, entries, ids, warns, emit, st):
     """[목차] … [/목차] → 양식의 목차 제목·단계별 목차 줄 견본으로 목차를 만든다."""
     if not entries:
@@ -3146,9 +3454,11 @@ def make_toc(doc, entries, ids, warns, emit, st):
             for a in ('pageBreak', 'columnBreak'):
                 if blk.get(a) is not None:
                     blk.set(a, '0')
-            fill_para(blk, role.a, role.b, role.lead, '', entry + ('  ' + page if page else ''), role.body_cp)
+            auto = toc_auto(page)
+            fill_para(blk, role.a, role.b, role.lead, '', entry + ('  ' + page if page and not auto else ''), role.body_cp)
             ids.renew(blk)
             emit(blk, role.key)
+            st['toc'].append((blk, role.lead + entry, '' if auto else page))
         return
     if doc.toc_head is not None:
         blk = copy.deepcopy(doc.blocks[doc.toc_head].el)
@@ -3157,7 +3467,6 @@ def make_toc(doc, entries, ids, warns, emit, st):
         ids.renew(blk)
         strip_lineseg(blk)
         emit(blk, 'tochead')
-    nopage = 0
     for e in entries:
         if e[0] == 'pagebreak':
             st['pending'] = True
@@ -3175,14 +3484,11 @@ def make_toc(doc, entries, ids, warns, emit, st):
         for a in ('pageBreak', 'columnBreak'):
             if blk.get(a) is not None:
                 blk.set(a, '0')
-        fill_toc_para(blk, entry, page)
+        auto = toc_auto(page)
+        fill_toc_para(blk, entry, '' if auto else page)
         ids.renew(blk)
-        nopage += 0 if page else 1
         emit(blk, 'toc:' + sig)
-    if nopage:
-        warns.append('목차 %d줄은 쪽 번호가 비어 있습니다. 한글에서 쪽을 확인해 적어 주세요.' % nopage)
-    else:
-        warns.append('목차 쪽 번호는 개요에 적힌 대로 넣었습니다. 한글에서 실제 쪽과 맞는지 확인하세요.')
+        st['toc'].append((blk, entry, '' if auto else page))  # 쪽 번호는 다 만든 뒤 fill_toc_pages가 채운다
 
 
 def make_plain_table(doc, rows, ids, warns):
@@ -3481,8 +3787,8 @@ class PageGauge:
             total += rh
         return total
 
-    def pages(self, blocks):
-        """(쪽 수, 마지막 쪽을 채운 비율)."""
+    def pages(self, blocks, where=None):
+        """(쪽 수, 마지막 쪽을 채운 비율). where(목록)를 주면 문단마다 시작하는 쪽(1부터)을 차례로 담는다."""
         W, Hh = 48190, 70018  # A4 기본 여백
         for b in blocks:
             pp = next(b.iter(P('pagePr')), None)
@@ -3503,16 +3809,22 @@ class PageGauge:
             if p.get('pageBreak') == '1' and y > 0:
                 n, y = n + 1, 0.0
             h, tail, solid = self.para(p, W)
+            start = n
             if y + h - tail <= Hh:
                 y += h
             elif solid:  # 글자처럼 취급한 표·그림은 쪽을 넘겨 나뉘지 않고 통째로 다음 쪽으로 간다
                 if y > 0:
                     n += 1
+                start = n
                 y = min(h, Hh)
             else:
+                if Hh - y < min(h, 1500):  # 첫 줄도 들어가지 않으면 다음 쪽에서 시작
+                    start = n + 1
                 y += h
                 while y > Hh:
                     n, y = n + 1, y - Hh
+            if where is not None:
+                where.append(start)
         return n, y / Hh if Hh else 0
 
 
