@@ -319,7 +319,7 @@ fieldset.fit input { width: 20px; height: 20px; margin: 4px 0 0; accent-color: v
   </section>
 
   <footer>
-    <span>개인정보 가리개 1.4 · 인터넷 연결 없이 동작</span>
+    <span>개인정보 가리개 1.5 · 인터넷 연결 없이 동작</span>
     <span>만든 사람: 김진현(AI한술)</span>
   </footer>
 </div>
@@ -1548,7 +1548,13 @@ const HG = (() => {
     // 테두리: 표의 마지막 줄은 아래 테두리(굵은 선 등)를 가진 경우가 많다. 묶음을 이어 붙이면 그 줄이 가운데로 가므로
     // 앞 묶음 마지막 줄(가운데 줄)의 테두리로 바꾸고, 맨 마지막에 붙는 묶음에만 원래 테두리를 남긴다.
     const lastRow = rows[u[u.length - 1]], prevU = pr.units.length > 1 ? pr.units[pr.units.length - 2] : null;
-    const mid = prevU && prevU[prevU.length - 1] > 0 ? rows[prevU[prevU.length - 1]] : null;
+    let mid = prevU && prevU[prevU.length - 1] > 0 ? rows[prevU[prevU.length - 1]] : null;
+    if (!mid && pr.units.length === 1) {
+      // 묶음마다 나뉜 사진 표: 바로 앞 사진 표의 마지막 줄(가운데 줄)의 테두리를 쓴다
+      const k0 = ctx.slots.indexOf(unitSlots[0]), ps = k0 > 0 ? ctx.slots[k0 - 1] : null;
+      const ptb = ps && ps.sc === sc && ps.para.cell && ps.para.cell.tbl;
+      if (ptb && ptb !== tb && ptb.trs.length) mid = { tr: ptb.trs[ptb.trs.length - 1] };
+    }
     const midBF = mid && mid !== lastRow && sameShape(mid.tr, lastRow.tr) ? mid.tr.cells.map(c => bfOf(toks[c.start])) : null;
     const lastTc = new Map(lastRow.tr.cells.map((c, j) => [c.start, j]));
     let num = S, made = 0;
@@ -1574,9 +1580,12 @@ const HG = (() => {
     };
     const ed = { part: g.part, rep: new Map(), drop: [], after: new Map() };
     if (midBF) setRowBF(ed, toks, lastRow.tr, midBF);
+    // 묶음 하나짜리 표(엔진이 묶음마다 나눈 사진 표)는 키우지 않고 같은 모양의 새 표를 묶음마다 하나씩 잇는다.
+    // 한 표로 키우면 쪽 끝에 다 들어가지 않을 때 표 전체가 다음 쪽으로 넘어가 앞 쪽 아래가 크게 빈다.
+    const single = pr.units.length === 1;
     // 1) 지금 표에 쪽 높이가 허락하는 만큼 묶음을 붙인다
     let th = rows.reduce((a, r) => a + r.h + r.grow, 0), inT = 0;
-    while (inT < nu && th + uh <= limit) { th += uh; inT++; }
+    while (!single && inT < nu && th + uh <= limit) { th += uh; inT++; }
     if (inT) {
       let base = rows.length, add = '';
       for (let q = 0; q < inT; q++) { add += cloneUnit(base); base += u.length; }
@@ -1587,14 +1596,18 @@ const HG = (() => {
     // 2) 남은 묶음은 같은 모양의 새 표에 나눠 담아 바로 뒤 문단으로 붙인다
     let left = nu - inT;
     if (left > 0) {
-      const per = Math.max(1, Math.floor(limit / uh));
+      const per = single ? 1 : Math.max(1, Math.floor(limit / uh));
       const cut = [tb.caption, tb.cellzoneList].filter(r => r && r[1] >= r[0]);
-      let shell = '';
+      let shell = '', omTok = -1;
       for (let i = tb.start + 1; i < rows[0].tr.start; i++) {
         const r = cut.find(x => x[0] <= i && i <= x[1]);
         if (r) { i = r[1]; continue; }
+        if (single && omTok < 0 && /^<(\w+:)?outMargin\b/.test(toks[i])) { omTok = i; shell += '\u0000OM\u0000'; continue; }
         shell += i === tb.szTok ? '\u0000SZ\u0000' : toks[i];
       }
+      // 이어 붙이는 표끼리 맞닿는 쪽의 바깥 여백을 없애 한 쪽 안에서는 한 표처럼 붙어 보이게 한다
+      const om = last => (omTok < 0 ? '' : last ? setAttr(toks[omTok], 'top', '0') : setAttr(setAttr(toks[omTok], 'top', '0'), 'bottom', '0'));
+      if (omTok >= 0) ed.rep.set(omTok, setAttr(toks[omTok], 'bottom', '0'));
       const pOpen = setAttr(setAttr(toks[tb.para.start], 'pageBreak', '0'), 'columnBreak', '0');
       const rpre = (/^<(\w+:)?run\b/.exec(toks[tb.run]) || [])[1] || '';
       const tpre = (/^<(\w+:)?tbl\b/.exec(toks[tb.start]) || [])[1] || '';
@@ -1607,7 +1620,7 @@ const HG = (() => {
         open = setAttr(open, 'id', newId(ctx.ids));
         if (/\bzOrder="/.test(open)) open = setAttr(open, 'zOrder', ++z);
         const sz = tb.szTok >= 0 ? setAttr(toks[tb.szTok], 'height', m * uhRaw) : '';
-        paras += pOpen + toks[tb.run] + open + shell.replace('\u0000SZ\u0000', sz) + body + toks[tb.end]
+        paras += pOpen + toks[tb.run] + open + shell.replace('\u0000SZ\u0000', sz).replace('\u0000OM\u0000', om(m === left)) + body + toks[tb.end]
           + '<' + tpre + 't/>' + '</' + rpre + 'run>' + toks[tb.para.end];
         left -= m;
       }
