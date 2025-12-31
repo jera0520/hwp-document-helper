@@ -12,6 +12,7 @@ hwpdoc.py — 한글(HWPX) 문서 자동 작성 엔진 v1.0
   python hwpdoc.py build   양식.hwpx 개요.txt -o 결과.hwpx  개요대로 같은 디자인의 새 문서 만들기
   python hwpdoc.py slots   양식.hwpx                        칸 목록 보기(신청서·서식 칸 채우기용)
   python hwpdoc.py fill    양식.hwpx 값.json -o 결과.hwpx    칸만 채우기(나머지는 100% 그대로)
+  python hwpdoc.py photos  문서.hwpx 사진들_또는_폴더... [--contain] [--keep] -o 결과.hwpx
   python hwpdoc.py check   결과.hwpx                        결과 점검(파일 구조·공문 표기·개인정보)
   python hwpdoc.py text    파일.hwpx|파일.hwp                글자만 꺼내기(.hwp는 읽기만 가능)
 
@@ -4406,6 +4407,569 @@ def analyze(path, outline_path=None, quiet=False, max_lines=400):
     return out
 
 
+# ---------------------------------------------------------------- 사진 넣기 (masker/core.js의 사진 배치 규칙)
+
+_PHOTO_MARK = re.compile(r'^\s*[\[［【]\s*사진\s*\d{0,3}\s*[\]］】]\s*$')
+_PHOTO_EXT = ('.jpg', '.jpeg', '.png', '.heic', '.heif', '.webp', '.gif', '.bmp', '.tif', '.tiff')
+
+
+def _photo_round(v):
+    """배치 치수는 JS Math.round와 같은 반올림. 이미지 전처리는 photos.sh의 round 사용."""
+    return math.floor(v + 0.5)
+
+
+def _photo_num(e, key, default=0):
+    return int(e.get(key, default) or default) if e is not None else default
+
+
+def _photo_text(p):
+    return ''.join(''.join(t.itertext()) for r in p.findall(P('run')) for t in r.findall(P('t')))
+
+
+def _photo_paras(tc):
+    return tc.findall(P('subList') + '/' + P('p'))
+
+
+def _photo_cell_text(tc):
+    return re.sub(r'\s+', ' ', ' '.join(_photo_text(p) for p in _photo_paras(tc))).strip()
+
+
+def _photo_blank(p):
+    for r in p.findall(P('run')):
+        for t in r.findall(P('t')):
+            t.text = None
+            for child in list(t):
+                t.remove(child)
+    ls = p.find(P('linesegarray'))
+    if ls is not None:
+        p.remove(ls)
+
+
+def _photo_only(p, skip):
+    """지정 개체 밖에 빈 글자·run·줄 정보만 있으면 문단째 지워도 된다."""
+    def empty(e):
+        if e in skip:
+            return True
+        if local(e.tag) not in {'run', 't', 'linesegarray', 'lineseg'} or (e.text or '').strip():
+            return False
+        return all(empty(c) and not (c.tail or '').strip() for c in e)
+    return not (p.text or '').strip() and all(empty(e) and not (e.tail or '').strip() for e in p)
+
+
+def _photo_same_row(a, b):
+    def shape(tr):
+        return [(_photo_num(c.find(P('cellAddr')), 'colAddr'), tc_span(c)) for c in tr.findall(P('tc'))]
+    return shape(a) == shape(b)
+
+
+def _photo_border(dst, src):
+    if _photo_same_row(dst, src):
+        for a, b in zip(dst.findall(P('tc')), src.findall(P('tc'))):
+            if b.get('borderFillIDRef'):
+                a.set('borderFillIDRef', b.get('borderFillIDRef'))
+
+
+class _PhotoDoc:
+    """이 명령만 쓰는 사진 자리 문맥. 기존 build/fill의 서식 보정은 호출하지 않는다."""
+
+    def __init__(self, pkg, roots=None):
+        self.pkg = pkg
+        self.roots = roots if roots is not None else {n: pkg.xml(n) for n in pkg.section_names()}
+        self.header = pkg.xml('Contents/header.xml')
+        self.pp = {p.get('id'): p for p in self.header.iter(H('paraPr'))}
+        self.cp = {c.get('id'): _photo_num(c, 'height', 1000) for c in self.header.iter(H('charPr'))}
+        self.slots = []
+        self.ids, self.z = set(), 0
+        shapes = {'tbl', 'pic', 'rect', 'ellipse', 'arc', 'polygon', 'curve', 'line', 'connectLine',
+                  'container', 'ole', 'equation', 'textart', 'video', 'chart'}
+        for name, root in self.roots.items():
+            for e in root.iter():
+                if local(e.tag) in shapes:
+                    self.ids.update(e.get(k) for k in ('id', 'instid') if e.get(k))
+                    self.z = max(self.z, _photo_num(e, 'zOrder'))
+            for p in root.iter(P('p')):
+                parent = p.getparent()
+                tc = parent.getparent() if parent.tag == P('subList') and parent.getparent().tag == P('tc') else None
+                if tc is None and parent is not root:
+                    continue
+                if not _PHOTO_MARK.fullmatch(_photo_text(p)) or not any(r.findall(P('t')) for r in p.findall(P('run'))):
+                    continue
+                s = self.frame(p, tc, root)
+                if s['w'] >= 1500 and s['h'] >= 1000:
+                    s.update(p=p, tc=tc, root=root, name=name, label=_photo_text(p).strip())
+                    self.slots.append(s)
+
+    def newid(self):
+        while True:
+            v = str(random.randrange(100000000, 2100000000))
+            if v not in self.ids:
+                self.ids.add(v)
+                return v
+
+    def style(self, p):
+        pp = self.pp.get(p.get('paraPrIDRef'))
+        run = next((r for r in p.findall(P('run')) if r.findall(P('t'))), None)
+        fh = self.cp.get(run.get('charPrIDRef') if run is not None else None, 1000)
+        def first(tag):
+            return next(pp.iter(H(tag)), None) if pp is not None else None
+        ls = first('lineSpacing')
+        typ = ls.get('type', 'PERCENT') if ls is not None else 'PERCENT'
+        val = _photo_num(ls, 'value', 160)
+        extra = max(0, _photo_round(fh * (val - 100) / 100)) if typ == 'PERCENT' else max(0, val) if typ == 'BETWEEN_LINES' else 0
+        height = max(val, fh) if typ in ('FIXED', 'AT_LEAST') else fh + extra
+        side = sum(_photo_num(first(k), 'value') for k in ('left', 'right')) + max(0, _photo_num(first('intent'), 'value')) + 60
+        return side, extra, height
+
+    def frame(self, p, tc, root):
+        side, extra, _ = self.style(p)
+        if tc is None:
+            pg = next(root.iter(P('pagePr')), None)
+            mg = pg.find(P('margin')) if pg is not None else None
+            w = _photo_num(pg, 'width') - sum(_photo_num(mg, k) for k in ('left', 'right', 'gutter')) if pg is not None else 42520
+            w = _photo_round(w * 0.6)
+            ps = list(root.iter(P('p')))
+            hint = next((_photo_text(q).strip() for q in ps[ps.index(p) + 1:] if q.getparent() is root and _photo_text(q).strip() and not _PHOTO_MARK.fullmatch(_photo_text(q))), '')
+            return dict(w=w, h=_photo_round(w * 0.75), grow=0, hint=hint)
+        tb = tc.getparent().getparent()
+        cm = tc.find(P('cellMargin'))
+        tm = tb.find(P('inMargin'))
+        mg = cm if tc.get('hasMargin') == '1' and cm is not None else tm if tm is not None else cm
+        margins = {k: _photo_num(mg, k) if mg is not None else v for k, v in dict(left=510, right=510, top=141, bottom=141).items()}
+        w, h = tc_size(tc)
+        ps = _photo_paras(tc)
+        w -= margins['left'] + margins['right'] + side
+        h -= margins['top'] + margins['bottom'] + sum(self.style(q)[2] for q in ps if q is not p) + (0 if ps[-1] is p else extra) + 60
+        grow = _photo_round(w * 0.75) - h if h < w * 0.45 else 0
+        hint = ' '.join(_photo_text(q).strip() for q in ps if q is not p and _photo_text(q).strip())
+        ad = tc.find(P('cellAddr'))
+        row, col = _photo_num(ad, 'rowAddr'), _photo_num(ad, 'colAddr')
+        cells = tb.findall(P('tr') + '/' + P('tc'))
+        def usable(c):
+            t = _photo_cell_text(c)
+            return t if not _PHOTO_MARK.fullmatch(t) else ''
+        if not hint:
+            below = next((c for c in cells if _photo_num(c.find(P('cellAddr')), 'colAddr') == col and _photo_num(c.find(P('cellAddr')), 'rowAddr') == row + tc_span(tc)[1]), None)
+            if below is not None and len(usable(below)) <= 40:
+                hint = usable(below)
+        if not hint:
+            left = [c for c in cells if _photo_num(c.find(P('cellAddr')), 'rowAddr') <= row < _photo_num(c.find(P('cellAddr')), 'rowAddr') + tc_span(c)[1] and _photo_num(c.find(P('cellAddr')), 'colAddr') < col and usable(c)]
+            if left:
+                hint = usable(max(left, key=lambda c: _photo_num(c.find(P('cellAddr')), 'colAddr')))
+        return dict(w=max(0, w), h=max(0, h + grow), grow=grow, hint=hint)
+
+    def limit(self, root):
+        pg = next(root.iter(P('pagePr')), None)
+        mg = pg.find(P('margin')) if pg is not None else None
+        h = _photo_num(pg, 'width' if pg is not None and pg.get('landscape') == 'NARROWLY' else 'height') - sum(_photo_num(mg, k) for k in ('top', 'bottom', 'header', 'footer'))
+        return (h if h > 20000 else 70018) - 10000
+
+    def rows(self, tb):
+        bycell = collections.defaultdict(list)
+        for s in self.slots:
+            if s['tc'] is not None and s['tc'].getparent().getparent() is tb:
+                bycell[s['tc']].append(s)
+        rows, units = [], []
+        for tr in tb.findall(P('tr')):
+            cells = tr.findall(P('tc'))
+            ph = [c for c in cells if c in bycell]
+            rows.append(dict(tr=tr, h=max([tc_size(c)[1] for c in cells if tc_span(c)[1] == 1] + [0]),
+                             grow=max([s['grow'] for c in ph for s in bycell[c]] + [0]), ph=ph))
+        first = next((i for i, r in enumerate(rows) if r['ph']), -1)
+        if first >= 0:
+            for i in range(first, len(rows)):
+                if rows[i]['ph'] or not units:
+                    units.append([i])
+                else:
+                    units[-1].append(i)
+            units[0] = list(range(first)) + units[0]
+        owner = {i: k for k, u in enumerate(units) for i in u}
+        crosses = any(i + tc_span(c)[1] > len(rows) or owner.get(i) != owner.get(min(len(rows) - 1, i + tc_span(c)[1] - 1)) for i, r in enumerate(rows) for c in r['tr'].findall(P('tc')))
+        return rows, units, bycell, crosses
+
+    def grow(self, n):
+        last = self.slots[-1]
+        tc, root = last['tc'], last['root']
+        if tc is None:
+            return '사진 자리가 표 안에 있지 않아'
+        tb = tc.getparent().getparent()
+        run = tb.getparent()
+        p = run.getparent()
+        if run.tag != P('run') or p.tag != P('p'):
+            return '사진 표 모양을 알아보지 못해'
+        rows, units, bycell, crosses = self.rows(tb)
+        if not units or crosses:
+            return '사진 표에 여러 줄을 합친 칸이 있어'
+        u = units[-1]
+        allowed = {'tr', 'tc', 'subList', 'p', 'run', 't', 'cellAddr', 'cellSpan', 'cellSz', 'cellMargin', 'linesegarray', 'lineseg'}
+        for i in u:
+            for e in rows[i]['tr'].iter():
+                if any(a.tag == P('t') for a in e.iterancestors()):
+                    continue
+                if local(e.tag) not in allowed:
+                    return '사진 표 마지막 줄에 그림·표 같은 개체가 있어'
+        unit_slots = [s for s in self.slots if s['tc'] is not None and any(s['tc'].getparent() is rows[i]['tr'] for i in u)]
+        if not unit_slots:
+            return '사진 표 모양을 알아보지 못해'
+        copies = math.ceil((n - len(self.slots)) / len(unit_slots))
+        uh = sum(rows[i]['h'] + rows[i]['grow'] for i in u)
+        raw = sum(rows[i]['h'] for i in u)
+        if uh > self.limit(root):
+            raise HwpError('복제할 사진 줄 묶음 높이 %d가 쪽 안 허용 높이 %d보다 큽니다.' % (uh, self.limit(root)))
+        slot_paras = {s['p'] for s in unit_slots}
+        slot_coords = {(j, ci, pi) for j, i in enumerate(u) for ci, c in enumerate(rows[i]['tr'].findall(P('tc')))
+                       for pi, q in enumerate(_photo_paras(c)) if q in slot_paras}
+        # 원본 끝 테두리를 보관한 뒤 가운데 선으로 바꾼다.
+        template = [copy.deepcopy(rows[i]['tr']) for i in u]
+        lastrow = rows[u[-1]]['tr']
+        mid = rows[units[-2][-1]]['tr'] if len(units) > 1 and units[-2][-1] > 0 else None
+        if mid is None and len(units) == 1:
+            k = self.slots.index(unit_slots[0])
+            prev = self.slots[k - 1] if k else None
+            if prev is not None and prev['root'] is root and prev['tc'] is not None:
+                pt = prev['tc'].getparent().getparent()
+                if pt is not tb:
+                    mid = pt.findall(P('tr'))[-1]
+        if mid is not None:
+            _photo_border(lastrow, mid)
+        num, made = len(self.slots), 0
+        def clone(base):
+            nonlocal num, made
+            made += 1
+            trs = copy.deepcopy(template)
+            # 문단 차례대로 번호를 붙이되 늘린 칸의 설명은 모두 비운다.
+            for j, tr in enumerate(trs):
+                for ci, c in enumerate(tr.findall(P('tc'))):
+                    ad = c.find(P('cellAddr'))
+                    if ad is not None:
+                        ad.set('rowAddr', str(base + j))
+                    for pi, q in enumerate(_photo_paras(c)):
+                        marker = (j, ci, pi) in slot_coords
+                        _photo_blank(q)
+                        if marker:
+                            num += 1
+                            if num <= n:
+                                t = next(q.iter(P('t')), None)
+                                if t is not None:
+                                    t.text = '[사진%d]' % num
+            if mid is not None and made < copies:
+                _photo_border(trs[-1], mid)
+            return trs
+        single = len(units) == 1
+        height = sum(r['h'] + r['grow'] for r in rows)
+        inside = 0
+        while not single and inside < copies and height + uh <= self.limit(root):
+            height += uh
+            inside += 1
+        if inside:
+            base = len(rows)
+            for _ in range(inside):
+                tb.extend(clone(base))
+                base += len(u)
+            tb.set('rowCnt', str(base))
+            sz = tb.find(P('sz'))
+            if sz is not None:
+                sz.set('height', str(_photo_num(sz, 'height') + inside * raw))
+        left = copies - inside
+        anchor = p
+        per = 1 if single else max(1, self.limit(root) // max(1, uh))
+        om = tb.find(P('outMargin'))
+        orig_om = copy.deepcopy(om)
+        if single and left and om is not None:
+            om.set('bottom', '0')
+        while left:
+            m = min(per, left)
+            q = etree.Element(p.tag, dict(p.attrib), nsmap=p.nsmap)
+            q.set('pageBreak', '0')
+            q.set('columnBreak', '0')
+            r = etree.SubElement(q, run.tag, dict(run.attrib))
+            t = copy.deepcopy(tb)
+            for child in list(t):
+                if child.tag in (P('tr'), P('caption'), P('cellzoneList')):
+                    t.remove(child)
+            t.set('id', self.newid())
+            if t.get('zOrder') is not None:
+                self.z += 1
+                t.set('zOrder', str(self.z))
+            t.set('rowCnt', str(m * len(u)))
+            sz = t.find(P('sz'))
+            if sz is not None:
+                sz.set('height', str(m * raw))
+            margin = t.find(P('outMargin'))
+            if single and margin is not None:
+                margin.set('top', '0')
+                margin.set('bottom', orig_om.get('bottom', '0') if m == left else '0')
+            for j in range(m):
+                t.extend(clone(j * len(u)))
+            r.append(t)
+            etree.SubElement(r, P('t'))
+            anchor.addnext(q)
+            anchor = q
+            left -= m
+        ls = p.find(P('linesegarray'))
+        if ls is not None:
+            p.remove(ls)
+        return ''
+
+    def shrink(self, n):
+        idx = {s['p']: i for i, s in enumerate(self.slots)}
+        original_end = self.slots[-1]['tc']
+        original_row = copy.deepcopy(original_end.getparent().getparent().findall(P('tr'))[-1]) if original_end is not None else None
+        seen = set()
+        for s in self.slots[n:]:
+            c, p = s['tc'], s['p']
+            if c is None:
+                if _photo_only(p, set(p.iter(P('t')))):
+                    p.getparent().remove(p)
+                else:
+                    _photo_blank(p)
+                continue
+            tb = c.getparent().getparent()
+            if tb in seen:
+                continue
+            seen.add(tb)
+            rows, units, bycell, crosses = self.rows(tb)
+            gone = [not crosses and all(all(idx[x['p']] >= n for x in bycell[cc]) for i in u for cc in rows[i]['ph']) for u in units]
+            if units and all(gone):
+                p = tb.getparent().getparent()
+                if _photo_only(p, {tb}):
+                    p.getparent().remove(p)
+                else:
+                    tb.getparent().remove(tb)
+                continue
+            remove = {i for u, g in zip(units, gone) if g for i in u}
+            if remove:
+                keep = [i for i in range(len(rows)) if i not in remove]
+                nr = {i: j for j, i in enumerate(keep)}
+                for i in remove:
+                    tb.remove(rows[i]['tr'])
+                for i in keep:
+                    for cc in rows[i]['tr'].findall(P('tc')):
+                        ad = cc.find(P('cellAddr'))
+                        if ad is not None:
+                            ad.set('rowAddr', str(nr[i]))
+                tb.set('rowCnt', str(len(keep)))
+                sz = tb.find(P('sz'))
+                if sz is not None:
+                    sz.set('height', str(max(1, _photo_num(sz, 'height') - sum(rows[i]['h'] for i in remove))))
+                zl = tb.find(P('cellzoneList'))
+                if zl is not None:
+                    for zn in list(zl):
+                        kept = [i for i in keep if _photo_num(zn, 'startRowAddr') <= i <= _photo_num(zn, 'endRowAddr')]
+                        if not kept:
+                            zl.remove(zn)
+                        else:
+                            zn.set('startRowAddr', str(nr[kept[0]]))
+                            zn.set('endRowAddr', str(nr[kept[-1]]))
+                    if not len(zl):
+                        tb.remove(zl)
+                ls = tb.getparent().getparent().find(P('linesegarray'))
+                if ls is not None:
+                    ls.getparent().remove(ls)
+            for u, g in zip(units, gone):
+                if g:
+                    continue
+                for i in u:
+                    for cc in rows[i]['ph']:
+                        if not all(idx[x['p']] >= n for x in bycell[cc]):
+                            continue
+                        for q in _photo_paras(cc):
+                            _photo_blank(q)
+                        col = _photo_num(cc.find(P('cellAddr')), 'colAddr')
+                        for i2 in u:
+                            if rows[i2]['ph']:
+                                continue
+                            for d in rows[i2]['tr'].findall(P('tc')):
+                                dc = _photo_num(d.find(P('cellAddr')), 'colAddr')
+                                if col <= dc and dc + tc_span(d)[0] <= col + tc_span(cc)[0]:
+                                    for q in _photo_paras(d):
+                                        _photo_blank(q)
+        kt = self.slots[n - 1]['tc']
+        if kt is not None and original_row is not None:
+            kept = kt.getparent().getparent().findall(P('tr'))
+            if len(kept) > 1:
+                _photo_border(kept[-1], original_row)
+
+
+def _photo_pic(ctx, s, binid, pxw, pxh, contain):
+    w, h = s['w'], s['h']
+    if contain:
+        k = min(w / pxw, h / pxh)
+        w, h = max(1, _photo_round(pxw * k)), max(1, _photo_round(pxh * k))
+    ow, oh = pxw * 75, pxh * 75
+    ctx.z += 1
+    pic = etree.Element(P('pic'), nsmap={'hp': NS_HP, 'hc': NS_HC}, attrib=dict(
+        id=ctx.newid(), zOrder=str(ctx.z), numberingType='PICTURE', textWrap='TOP_AND_BOTTOM',
+        textFlow='BOTH_SIDES', lock='0', dropcapstyle='None', href='', groupLevel='0', instid=ctx.newid(), reverse='0'))
+    def add(tag, **attrs):
+        return etree.SubElement(pic, P(tag), {k: str(v) for k, v in attrs.items()})
+    add('offset', x=0, y=0)
+    add('orgSz', width=ow, height=oh)
+    add('curSz', width=w, height=h)
+    add('flip', horizontal=0, vertical=0)
+    add('rotationInfo', angle=0, centerX=w // 2, centerY=h // 2, rotateimage=1)
+    ri = add('renderingInfo')
+    for tag, sx, sy in [('transMatrix', '1', '1'), ('scaMatrix', '%.6f' % (w / ow), '%.6f' % (h / oh)), ('rotMatrix', '1', '1')]:
+        etree.SubElement(ri, C(tag), dict(e1=sx, e2='0', e3='0', e4='0', e5=sy, e6='0'))
+    etree.SubElement(pic, C('img'), dict(binaryItemIDRef=binid, bright='0', contrast='0', effect='REAL_PIC', alpha='0'))
+    rect = add('imgRect')
+    for i, (x, y) in enumerate([(0, 0), (ow, 0), (ow, oh), (0, oh)]):
+        etree.SubElement(rect, C('pt%d' % i), dict(x=str(x), y=str(y)))
+    add('imgClip', left=0, right=ow, top=0, bottom=oh)
+    add('inMargin', left=0, right=0, top=0, bottom=0)
+    add('imgDim', dimwidth=ow, dimheight=oh)
+    add('effects')
+    add('sz', width=w, widthRelTo='ABSOLUTE', height=h, heightRelTo='ABSOLUTE', protect=0)
+    add('pos', treatAsChar=1, affectLSpacing=0, flowWithText=1, allowOverlap=0, holdAnchorAndSO=0,
+        vertRelTo='PARA', horzRelTo='COLUMN', vertAlign='TOP', horzAlign='LEFT', vertOffset=0, horzOffset=0)
+    add('outMargin', left=0, right=0, top=0, bottom=0)
+    add('shapeComment').text = '그림입니다.'
+    return pic
+
+
+def photos(path, sources, out, contain=False, keep=False):
+    """사진을 JPG로 정리해 [사진N] 자리에 넣는다. Pillow는 이 명령에서만 필요하다."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        raise HwpError('사진 넣기에는 Pillow 패키지가 필요합니다 (pip install Pillow).')
+    if os.path.realpath(path) == os.path.realpath(out):
+        raise HwpError('원본을 보존하려면 결과 파일 이름을 다르게 지정해 주세요.')
+    files = []
+    for a in sources:
+        if os.path.isdir(a):
+            natural = lambda p: [int(x) if x.isdigit() else x for x in re.split(r'(\d+)', os.path.basename(p).lower())]
+            files.extend(sorted((os.path.join(a, n) for n in os.listdir(a) if not n.startswith('.') and n.lower().endswith(_PHOTO_EXT) and os.path.isfile(os.path.join(a, n))), key=natural))
+        else:
+            files.append(a)
+    if not files:
+        raise HwpError('넣을 사진을 찾지 못했습니다.')
+    pkg = Package(path)
+    ctx = _PhotoDoc(pkg)
+    before = len(ctx.slots)
+    if not before:
+        raise HwpError('이 문서에는 [사진1] 같은 사진 자리가 없습니다.')
+    messages = []
+    if not keep and len(files) != before:
+        if len(files) > before:
+            why = ctx.grow(len(files))
+            if why:
+                messages.append('사진 자리를 늘릴 수 없습니다(%s). 앞 %d장까지 넣습니다.' % (why, before))
+        else:
+            ctx.shrink(len(files))
+        ctx = _PhotoDoc(pkg, ctx.roots)
+    after = len(ctx.slots)
+    hpf = pkg.xml('Contents/content.hpf')
+    manifest = next((e for e in hpf.iter() if local(e.tag) == 'manifest'), None)
+    if manifest is None:
+        raise HwpError('문서의 그림 파일 목록(manifest)을 찾지 못했습니다.')
+    nums = [int(m.group(1)) for n in pkg.names for m in [re.match(r'BinData/[A-Za-z]*(\d+)\.', n)] if m]
+    nums += [int(m.group(1)) for e in hpf.iter() for m in [re.fullmatch(r'[A-Za-z]*(\d+)', e.get('id', ''))] if m]
+    nextbin = max(nums + [0]) + 1
+    count, grows = 0, collections.defaultdict(dict)
+    for src in files:
+        name = os.path.basename(src)
+        if count >= after:
+            messages.append('넣지 못한 사진: %s (자리가 모자람)' % name)
+            continue
+        s = ctx.slots[count]
+        try:
+            if src.lower().endswith(('.heic', '.heif')):
+                try:
+                    import pillow_heif
+                except ImportError:
+                    messages.append('넣지 못한 사진: %s (HEIC 사진은 JPG로 바꿔서 올려 주세요)' % name)
+                    continue
+                pillow_heif.register_heif_opener()
+            with Image.open(src) as image:
+                im = ImageOps.exif_transpose(image)
+                if im.mode in ('RGBA', 'LA', 'P'):
+                    im = im.convert('RGBA')
+                    bg = Image.new('RGB', im.size, 'white')
+                    bg.paste(im, mask=im.getchannel('A'))
+                    im = bg
+                else:
+                    im = im.convert('RGB')
+            sw, sh = im.size
+            if not contain:
+                a = s['w'] / s['h']
+                if sw / sh > a:
+                    w = max(1, round(sh * a))
+                    x = round((sw - w) / 2)
+                    im = im.crop((x, 0, x + w, sh))
+                else:
+                    h = max(1, round(sw / a))
+                    y = round((sh - h) * 0.25)
+                    im = im.crop((0, y, sw, y + h))
+                sw, sh = im.size
+            f = min(1, s['w'] / 24 / sw, s['h'] / 24 / sh)
+            pxw, pxh = max(1, round(sw * f)), max(1, round(sh * f))
+            if (pxw, pxh) != im.size:
+                im = im.resize((pxw, pxh), Image.Resampling.LANCZOS)
+            b = io.BytesIO()
+            im.save(b, 'JPEG', quality=86)
+        except Exception as e:
+            messages.append('넣지 못한 사진: %s (읽지 못함: %s)' % (name, e))
+            continue
+        binid = 'image%d' % nextbin
+        nextbin += 1
+        href = 'BinData/%s.jpg' % binid
+        pkg.changed[href] = b.getvalue()
+        etree.SubElement(manifest, '{%s}item' % etree.QName(manifest).namespace,
+                         dict(id=binid, href=href, **{'media-type': 'image/jpeg', 'isEmbeded': '1'}))
+        pic = _photo_pic(ctx, s, binid, pxw, pxh, contain)
+        p = s['p']
+        texts = [t for r in p.findall(P('run')) for t in r.findall(P('t'))]
+        texts[0].addprevious(pic)
+        _photo_blank(p)
+        if s['grow'] > 0 and s['tc'] is not None:
+            c = s['tc']
+            tb = c.getparent().getparent()
+            row = _photo_num(c.find(P('cellAddr')), 'rowAddr')
+            grows[tb][row] = max(grows[tb].get(row, 0), s['grow'])
+        count += 1
+        messages.append('%s ← %s (칸 설명: %s)' % (s['label'], name, s['hint'] or '없음'))
+    if not count:
+        raise HwpError('넣은 사진이 없습니다.\n' + '\n'.join(messages))
+    for tb, growth in grows.items():
+        for c in tb.findall(P('tr') + '/' + P('tc')):
+            row = _photo_num(c.find(P('cellAddr')), 'rowAddr')
+            add = sum(v for r, v in growth.items() if row <= r < row + tc_span(c)[1])
+            sz = c.find(P('cellSz'))
+            if sz is not None and add:
+                sz.set('height', str(_photo_num(sz, 'height') + add))
+        sz = tb.find(P('sz'))
+        if sz is not None:
+            sz.set('height', str(_photo_num(sz, 'height') + sum(growth.values())))
+    photo_tables = {s['tc'].getparent().getparent() for s in ctx.slots if s['tc'] is not None}
+    for tb in photo_tables:
+        height = _photo_num(tb.find(P('sz')), 'height')
+        limit = ctx.limit(tb.getroottree().getroot())
+        if height > limit:
+            raise HwpError('사진 표 높이 %d가 쪽 안 허용 높이 %d보다 커서 저장하지 않았습니다.' % (height, limit))
+    for name, root in ctx.roots.items():
+        pkg.put_xml(name, root)
+    pkg.put_xml('Contents/content.hpf', hpf)
+    # 구조 점검을 통과한 새 파일만 결과 경로로 옮긴다.
+    import tempfile
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix='.hwpx', dir=os.path.dirname(os.path.abspath(out)))
+    os.close(fd)
+    try:
+        pkg.save(tmp)
+        result = check(tmp, quiet=True)
+        if '파일 구조: 이상 없음' not in result:
+            raise HwpError('사진 결과의 파일 구조 점검에서 멈췄습니다.\n' + result)
+        os.replace(tmp, out)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    summary = '사진 %d장을 넣었습니다. 자리 %d곳 → %d곳(늘림 %d곳, 지움 %d곳).\n%s\n결과: %s' % (count, before, after, max(0, after - before), max(0, before - after), '\n'.join(messages), out)
+    if count < after:
+        summary += '\n사진이 모자라 빈 자리: ' + ', '.join(s['label'] for s in ctx.slots[count:])
+    print(summary)
+    return summary
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='한글(HWPX) 문서 자동 작성 엔진 v%s' % VERSION)
     sp = ap.add_subparsers(dest='cmd')
@@ -4424,6 +4988,12 @@ def main(argv=None):
     f.add_argument('-o', '--out', required=True)
     c = sp.add_parser('check', help='결과 점검')
     c.add_argument('hwpx')
+    ph = sp.add_parser('photos', help='사진 자리에 사진 넣기')
+    ph.add_argument('hwpx')
+    ph.add_argument('sources', nargs='+')
+    ph.add_argument('--contain', action='store_true')
+    ph.add_argument('--keep', action='store_true')
+    ph.add_argument('-o', '--out', required=True)
     t = sp.add_parser('text', help='글자 꺼내기(.hwpx/.hwp)')
     t.add_argument('file')
     args = ap.parse_args(argv)
@@ -4438,6 +5008,8 @@ def main(argv=None):
             fill(args.hwpx, args.values, args.out)
         elif args.cmd == 'check':
             check(args.hwpx)
+        elif args.cmd == 'photos':
+            photos(args.hwpx, args.sources, args.out, args.contain, args.keep)
         elif args.cmd == 'text':
             text(args.file)
         else:
